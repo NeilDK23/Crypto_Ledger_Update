@@ -141,6 +141,66 @@ def df_to_values(df):
     return [header] + rows
 
 
+def setup_vault_ledger_dropdown(wb, vault_names):
+    """
+    Keeps the Account Name dropdown in 'Vault Ledger'!C3 up to date.
+
+    Steps:
+      1. Write the unique, sorted vault names to a hidden helper sheet (_Lists).
+      2. Create a workbook-level named range (VaultNamesList) over those cells.
+      3. Apply a data-validation list to 'Vault Ledger'!C3 that reads from
+         the named range.
+
+    A named range is used as the source rather than a direct cross-sheet
+    address (e.g. _Lists!$A$2:$A$124) because Excel's data-validation
+    Formula1 parameter does not reliably accept cross-sheet references
+    without a named range wrapper.
+
+    Running this on every refresh means the dropdown automatically gains
+    any new vault accounts that appear in the Vault Accounts Report CSV.
+    """
+    vault_names_sorted = sorted(vault_names)
+    n = len(vault_names_sorted)
+
+    # ── Hidden helper sheet (_Lists) ──────────────────────────────────────────
+    # Holds the deduplicated vault name list used as the dropdown source.
+    # Hidden so it doesn't appear in the workbook tab bar.
+    LISTS_SHEET = "_Lists"
+    sheet_names = [s.name for s in wb.sheets]
+    if LISTS_SHEET in sheet_names:
+        ws_lists = wb.sheets[LISTS_SHEET]
+        ws_lists.clear()                    # wipe stale data from the last run
+    else:
+        ws_lists = wb.sheets.add(LISTS_SHEET)
+
+    # Write names as a vertical list: row 1 = header, rows 2..n+1 = names.
+    # Each inner list is one row, so [[name], [name], ...] writes vertically.
+    ws_lists.range("A1").value = "VaultNames"
+    ws_lists.range((2, 1), (n + 1, 1)).value = [[name] for name in vault_names_sorted]
+
+    # 0 = xlSheetHidden — hides the sheet from the tab bar
+    ws_lists.api.Visible = 0
+
+    # ── Named range (VaultNamesList) ──────────────────────────────────────────
+    # Delete any pre-existing definition with this name, then re-add it
+    # pointing at the freshly written cells on _Lists.
+    RANGE_NAME = "VaultNamesList"
+    existing_names = [nm.name for nm in wb.names]
+    if RANGE_NAME in existing_names:
+        wb.names[RANGE_NAME].delete()
+    wb.names.add(RANGE_NAME, f"=_Lists!$A$2:$A${n + 1}")
+
+    # ── Data validation on Vault Ledger!C3 ───────────────────────────────────
+    ws_vl = wb.sheets["Vault Ledger"]
+    cell  = ws_vl.range("C3")
+    cell.api.Validation.Delete()   # remove any previous validation rule first
+    cell.api.Validation.Add(
+        Type=3,        # xlValidateList  — dropdown populated from a list
+        AlertStyle=1,  # xlValidAlertStop — rejects values not in the list
+        Formula1="=VaultNamesList",
+    )
+
+
 def format_sheet(ws, df):
     """
     Apply formatting to a worksheet after data has been written:
@@ -218,6 +278,15 @@ tx_df["ParsedDateUnrounded"] = date_pairs.apply(lambda p: p[1])
 for col in ["Amount", "Network Fee", "ParsedDate", "ParsedDateUnrounded"]:
     if col in tx_df.columns:
         tx_df[col] = pd.to_numeric(tx_df[col], errors="coerce")
+
+# Drop transactions that never completed — these should not appear in the
+# Data tab or flow through to LedgerData.
+EXCLUDED_STATUSES = {"BLOCKED", "FAILED", "CANCELLED", "REJECTED"}
+before = len(tx_df)
+tx_df = tx_df[~tx_df["Status"].str.upper().isin(EXCLUDED_STATUSES)].reset_index(drop=True)
+excluded = before - len(tx_df)
+if excluded:
+    print(f"      Excluded {excluded:,} rows with non-completed status")
 
 print(f"      Date range: {tx_df['Date'].iloc[-1]}  to  {tx_df['Date'].iloc[0]}")
 
@@ -361,6 +430,10 @@ try:
         ws.range("A1").value = df_to_values(df)
         format_sheet(ws, df)
         print(" done")
+
+    print("      Updating Vault Ledger dropdown...", end="", flush=True)
+    setup_vault_ledger_dropdown(wb, internal_vaults)
+    print(" done")
 
     print("      Saving...", end="", flush=True)
     wb.save()
