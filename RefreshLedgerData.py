@@ -46,14 +46,17 @@ VAULT_REPORT_DIR       = "Vault Accounts Report"
 #   'DD-MMM-YYYY'       date display, e.g. 22-Apr-2026
 #   'DD-MMM-YYYY HH:MM:SS'  date + time display
 NUMBER_FORMATS = {
-    "Amount":              "#,##0.########",
-    "Network Fee":         "#,##0.########",
-    "NetworkFee":          "#,##0.########",
-    "Total Balance":       "#,##0.########",
-    "SeqNum":              "#,##0",
-    "Account ID":          "#,##0",
-    "ParsedDate":          "DD-MMM-YYYY",
-    "ParsedDateUnrounded": "DD-MMM-YYYY HH:MM:SS",
+    "Amount":                    "#,##0.########",
+    "Network Fee":               "#,##0.########",
+    "NetworkFee":                "#,##0.########",
+    "Service Fee":               "#,##0.########",
+    "Service fee":               "#,##0.########",
+    "Inflow / (Outflow) Amount": "#,##0.########",
+    "Total Balance":             "#,##0.########",
+    "SeqNum":                    "#,##0",
+    "Account ID":                "#,##0",
+    "ParsedDate":                "DD-MMM-YYYY",
+    "ParsedDateUnrounded":       "DD-MMM-YYYY HH:MM:SS",
 }
 
 # Applied to any numeric column not listed above (standard comma style)
@@ -61,6 +64,13 @@ DEFAULT_NUMERIC_FORMAT = "#,##0.##"
 
 # Header row background colour — light steel blue-grey (RGB hex, BGR byte order for COM)
 HEADER_BG_COLOR = 0xD6DCE4
+
+# Maps the Fireblocks 'Asset' field (network identifier) to a display network name.
+# Only USDT variants carry a network label; everything else shows blank.
+NETWORK_MAP = {
+    "TRX_USDT_S2UZ": "TRX",
+    "USDT_ERC20":     "ETH",
+}
 
 
 # ── Helper functions ───────────────────────────────────────────────────────────
@@ -141,6 +151,31 @@ def df_to_values(df):
     return [header] + rows
 
 
+def read_accepted_currencies(wb):
+    """
+    Read the accepted Asset Symbol values from _Lists sheet, Column C (C2 down).
+    Returns a set of strings, or an empty set if the column is blank or the
+    _Lists sheet doesn't exist yet (first run before the user populates it).
+    """
+    LISTS_SHEET = "_Lists"
+    if LISTS_SHEET not in [s.name for s in wb.sheets]:
+        return set()
+
+    ws = wb.sheets[LISTS_SHEET]
+
+    # If C2 is empty there are no accepted currencies defined — skip filtering
+    if ws.range("C2").value is None:
+        return set()
+
+    # expand("down") selects C2 and every consecutive non-empty cell below it.
+    # .value returns a scalar for a single cell or a list for multiple cells.
+    values = ws.range("C2").expand("down").value
+    if not isinstance(values, list):
+        values = [values]
+
+    return {str(v).strip() for v in values if v is not None and str(v).strip()}
+
+
 def setup_vault_ledger_dropdown(wb, vault_names):
     """
     Keeps the Account Name dropdown in 'Vault Ledger'!C3 up to date.
@@ -158,6 +193,9 @@ def setup_vault_ledger_dropdown(wb, vault_names):
 
     Running this on every refresh means the dropdown automatically gains
     any new vault accounts that appear in the Vault Accounts Report CSV.
+
+    Only column A is cleared and rewritten; columns D/E/F and the user-managed
+    AcceptedCurrencies in column C are left untouched.
     """
     vault_names_sorted = sorted(vault_names)
     n = len(vault_names_sorted)
@@ -169,17 +207,15 @@ def setup_vault_ledger_dropdown(wb, vault_names):
     sheet_names = [s.name for s in wb.sheets]
     if LISTS_SHEET in sheet_names:
         ws_lists = wb.sheets[LISTS_SHEET]
-        ws_lists.clear()                    # wipe stale data from the last run
+        ws_lists.range("A:A").clear()       # wipe column A only; D/E/F are untouched
     else:
         ws_lists = wb.sheets.add(LISTS_SHEET)
 
-    # Write names as a vertical list: row 1 = header, rows 2..n+1 = names.
+    # Write vault names as a vertical list: A1 = header, A2..A(n+1) = names.
     # Each inner list is one row, so [[name], [name], ...] writes vertically.
     ws_lists.range("A1").value = "VaultNames"
+    ws_lists.range("A1").api.Font.Bold = True
     ws_lists.range((2, 1), (n + 1, 1)).value = [[name] for name in vault_names_sorted]
-
-    # 0 = xlSheetHidden — hides the sheet from the tab bar
-    ws_lists.api.Visible = 0
 
     # ── Named range (VaultNamesList) ──────────────────────────────────────────
     # Delete any pre-existing definition with this name, then re-add it
@@ -245,6 +281,35 @@ def format_sheet(ws, df):
             data_range.api.NumberFormat = DEFAULT_NUMERIC_FORMAT
 
 
+
+def apply_autofilter(ws):
+    """Enable AutoFilter on the header row (row 1) of a worksheet."""
+    try:
+        if ws.api.AutoFilterMode:
+            ws.api.AutoFilterMode = False
+    except Exception:
+        pass
+    # Field=1 is required by the COM API; passing no criteria means show all rows.
+    ws.range("A1").api.AutoFilter(Field=1)
+
+
+def update_vault_ledger(wb, ledger_columns):
+    """
+    Update the column headers in row 5 of 'Vault Ledger' to match LedgerData.
+    Rows 6 onward are left untouched — formulas are managed manually in Excel.
+    """
+    ws = wb.sheets["Vault Ledger"]
+    n_cols = len(ledger_columns)
+    header_row = 5
+
+    # Clear and rewrite only the header row
+    ws.range((header_row, 1), (header_row, n_cols)).clear()
+    ws.range((header_row, 1)).value = ledger_columns
+    hdr = ws.range((header_row, 1), (header_row, n_cols))
+    hdr.api.Font.Bold      = True
+    hdr.api.Interior.Color = HEADER_BG_COLOR
+
+
 # ── Step 1: Find CSV exports ───────────────────────────────────────────────────
 print("=" * 60)
 print("Lumetrade Crypto Master — Refresh Script")
@@ -275,7 +340,7 @@ tx_df["ParsedDateUnrounded"] = date_pairs.apply(lambda p: p[1])
 
 # Convert known numeric columns from strings to actual numbers.
 # errors='coerce' turns any unparseable value (e.g. blank) into NaN.
-for col in ["Amount", "Network Fee", "ParsedDate", "ParsedDateUnrounded"]:
+for col in ["Amount", "Network Fee", "Service Fee", "ParsedDate", "ParsedDateUnrounded"]:
     if col in tx_df.columns:
         tx_df[col] = pd.to_numeric(tx_df[col], errors="coerce")
 
@@ -324,37 +389,44 @@ for _, row in tx_df.iterrows():
     dst_type = str(row.get("Destination Type", "")).strip()
 
     # Fields shared between the Outflow and Inflow records for this transaction
+    amount = row.get("Amount")
     common = {
-        "ParsedDate":          row.get("ParsedDate"),
-        "DateText":            row.get("Date"),          # original human-readable date
-        "Asset":               row.get("Asset Symbol"),  # e.g. 'USDT', 'TRX'
-        "Amount":              row.get("Amount"),
-        "NetworkFee":          row.get("Network Fee"),
-        "Note":                row.get("Note"),
-        "TxHash":              row.get("TxHash"),
-        "Source":              src_name,
-        "Destination":         dst_name,
-        "ParsedDateUnrounded": row.get("ParsedDateUnrounded"),
+        "TxHash":                      row.get("TxHash"),
+        "ParsedDateUnrounded":         row.get("ParsedDateUnrounded"),
+        "ParsedDate":                  row.get("ParsedDate"),
+        "Asset":                       row.get("Asset"),             # raw identifier e.g. 'TRX_USDT_S2UZ'
+        "Asset Symbol":                row.get("Asset Symbol"),      # display symbol e.g. 'USDT', 'TRX'
+        "Network":                     NETWORK_MAP.get(str(row.get("Asset") or ""), ""),
+        "Direction":                   None,   # filled per side below
+        "Note":                        row.get("Note"),
+        "Amount":                      amount,
+        "Source":                      src_name,
+        "Source Type":                 src_type,
+        "Source Wallet Address":       row.get("Source Address"),
+        "Destination":                 dst_name,
+        "Destination Type":            dst_type,
+        "Destination Wallet Address":  row.get("Destination Address"),
+        "NetworkFee":                  row.get("Network Fee"),
+        "Service fee":                 row.get("Service Fee"),
     }
 
     # Outflow — source vault is sending funds; record it from that vault's perspective
     if src_name in internal_vaults:
+        outflow_amount = -amount if pd.notna(amount) else None
         output_rows.append({
             **common,
-            "VaultName":        src_name,
-            "Direction":        "Outflow",
-            "CounterpartyType": dst_type,   # who received the funds
-            "Counterparty":     dst_name,
+            "VaultName":             src_name,
+            "Direction":             "Outflow",
+            "Inflow / (Outflow) Amount": outflow_amount,
         })
 
     # Inflow — destination vault is receiving funds; record it from that vault's perspective
     if dst_name in internal_vaults:
         output_rows.append({
             **common,
-            "VaultName":        dst_name,
-            "Direction":        "Inflow",
-            "CounterpartyType": src_type,   # who sent the funds
-            "Counterparty":     src_name,
+            "VaultName":             dst_name,
+            "Direction":             "Inflow",
+            "Inflow / (Outflow) Amount": amount,
         })
 
 # Build DataFrame from the collected rows
@@ -378,10 +450,11 @@ else:
 
     # Arrange columns in the standard LedgerData layout
     ledger_df = ledger_df[[
-        "Key", "VaultName", "SeqNum", "ParsedDate", "DateText",
-        "Asset", "Direction", "CounterpartyType", "Counterparty",
-        "Amount", "NetworkFee", "Note", "TxHash",
-        "Source", "Destination", "ParsedDateUnrounded",
+        "Key", "SeqNum", "VaultName", "TxHash", "ParsedDateUnrounded", "ParsedDate",
+        "Asset", "Asset Symbol", "Network", "Direction", "Note", "Amount",
+        "Source", "Source Type", "Source Wallet Address",
+        "Destination", "Destination Type", "Destination Wallet Address",
+        "NetworkFee", "Service fee", "Inflow / (Outflow) Amount",
     ]]
 
     print(f"      {len(ledger_df):,} rows across {ledger_df['VaultName'].nunique()} vaults")
@@ -415,24 +488,67 @@ try:
     wb = app.books.open(full_path)
     print("      Opened successfully")
 
+    # ── Read accepted currencies from _Lists!C before the sheet is cleared ────
+    # This must happen here — setup_vault_ledger_dropdown clears _Lists later.
+    accepted_currencies = read_accepted_currencies(wb)
+    if accepted_currencies:
+        print(f"      Accepted currencies: {', '.join(sorted(accepted_currencies))}")
+
+        # Filter the transaction data to only include accepted asset symbols.
+        # This applies to both the Data tab and (via ledger_df) LedgerData.
+        before = len(tx_df)
+        tx_df = tx_df[tx_df["Asset Symbol"].isin(accepted_currencies)].reset_index(drop=True)
+        excluded_curr = before - len(tx_df)
+        if excluded_curr:
+            print(f"      Excluded {excluded_curr:,} rows with unaccepted asset symbols")
+
+        # Apply the same filter to LedgerData on the Asset Symbol column.
+        # Recalculate SeqNum and Key so the sequence stays gap-free after removal.
+        ledger_df = ledger_df[ledger_df["Asset Symbol"].isin(accepted_currencies)].copy()
+        ledger_df["SeqNum"] = ledger_df.groupby("VaultName").cumcount() + 1
+        ledger_df["Key"]    = ledger_df["VaultName"] + "|" + ledger_df["SeqNum"].astype(str)
+        ledger_df = ledger_df.reset_index(drop=True)
+        print(f"      LedgerData after currency filter: {len(ledger_df):,} rows")
+
     # Write all three sheets in one loop.
     # ws.clear()                  — removes existing content and formatting
     # ws.range("A1").value = data — bulk write: header + all rows at once (fast)
     # format_sheet(ws, df)        — bold header, number formats
-    for sheet_name, df, label in [
-        ("Data",       tx_df,     "Data"),
-        ("VaultData",  vault_df,  "VaultData"),
-        ("LedgerData", ledger_df, "LedgerData"),
+    # apply_autofilter(ws)        — enable column-header filter dropdowns
+    for sheet_name, df, label, with_filter in [
+        ("Data",       tx_df,     "Data",       True),
+        ("VaultData",  vault_df,  "VaultData",  False),
+        ("LedgerData", ledger_df, "LedgerData", True),
     ]:
         print(f"      Writing {label} tab ({len(df):,} rows)...", end="", flush=True)
         ws = wb.sheets[sheet_name]
         ws.clear()
         ws.range("A1").value = df_to_values(df)
         format_sheet(ws, df)
+        if with_filter:
+            apply_autofilter(ws)
+        print(" done")
+
+    # ── LedgerData column U: "Spam?" header + per-row formula ────────────────
+    # ws.clear() above wipes column U, so the header and formulas are rewritten here.
+    if not ledger_df.empty:
+        print("      Writing Spam? column in LedgerData...", end="", flush=True)
+        ws_ledger = wb.sheets["LedgerData"]
+        ws_ledger.range("V1").value = "Spam?"
+        ws_ledger.range("V1").api.Font.Bold = True
+        ws_ledger.range("V1").api.Interior.Color = HEADER_BG_COLOR
+        n_ledger = len(ledger_df)
+        ws_ledger.range(f"V2:V{n_ledger + 1}").formula = (
+            '=IF(J2="Inflow",IF(L2>XLOOKUP(H2,_Lists!C:C,_Lists!E:E),"","Spam"),"")'
+        )
         print(" done")
 
     print("      Updating Vault Ledger dropdown...", end="", flush=True)
     setup_vault_ledger_dropdown(wb, internal_vaults)
+    print(" done")
+
+    print("      Updating Vault Ledger tab...", end="", flush=True)
+    update_vault_ledger(wb, list(ledger_df.columns))
     print(" done")
 
     print("      Saving...", end="", flush=True)
