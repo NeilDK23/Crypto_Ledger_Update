@@ -236,6 +236,9 @@ def setup_vault_ledger_dropdown(wb, vault_names):
         Formula1="=VaultNamesList",
     )
 
+    # Hide the sheet so it doesn't appear in the workbook tab bar
+    ws_lists.api.Visible = False
+
 
 def format_sheet(ws, df):
     """
@@ -517,7 +520,7 @@ try:
     # apply_autofilter(ws)        — enable column-header filter dropdowns
     for sheet_name, df, label, with_filter in [
         ("Data",       tx_df,     "Data",       True),
-        ("LedgerData", ledger_df, "LedgerData", True),
+        ("LedgerData", ledger_df, "LedgerData", False),  # AutoFilter applied after Spam? col is written
     ]:
         print(f"      Writing {label} tab ({len(df):,} rows)...", end="", flush=True)
         ws = wb.sheets[sheet_name]
@@ -546,7 +549,10 @@ try:
     except Exception:
         pass
     ws_vd.range("A1").api.AutoFilter(Field=1)
-    ws_vd.range("A1").api.AutoFilter(Field=10, Criteria1="<>0", Operator=1, Criteria2="<>")
+    # Field=13 targets column M (Difference) in the updated VaultData recon layout:
+    # H=Accepted Currency?, I=Gas Fees, J=Gross Balance, K=Less Gas Fees,
+    # L=Net Balance, M=Difference, N=Difference %
+    ws_vd.range("A1").api.AutoFilter(Field=13, Criteria1="<>0", Operator=1, Criteria2="<>")
     print(" done")
 
     # ── LedgerData column U: "Spam?" header + per-row formula ────────────────
@@ -561,6 +567,221 @@ try:
         ws_ledger.range(f"V2:V{n_ledger + 1}").formula = (
             '=IF(J2="Inflow",IF(L2>XLOOKUP(H2,_Lists!C:C,_Lists!E:E),"","Spam"),"")'
         )
+        print(" done")
+
+        # Apply AutoFilter across A:V now that the Spam? header in V1 is present,
+        # so Excel auto-detects the full A:V range as a single contiguous region.
+        print("      Applying LedgerData AutoFilter (A:V)...", end="", flush=True)
+        try:
+            if ws_ledger.api.AutoFilterMode:
+                ws_ledger.api.AutoFilterMode = False
+        except Exception:
+            pass
+        ws_ledger.range("A1").api.AutoFilter(Field=1)
+        print(" done")
+
+    # ── USDT Master tab ───────────────────────────────────────────────────────
+    # Filter LedgerData to USDT only, sort chronologically, write to USDT Master,
+    # then append Spam? (V) and the three running-balance columns (W, X, Y).
+    if not ledger_df.empty and "USDT Master" in [s.name for s in wb.sheets]:
+        usdt_df = ledger_df[ledger_df["Asset Symbol"] == "USDT"].copy()
+        usdt_df = usdt_df.sort_values("ParsedDateUnrounded", na_position="last").reset_index(drop=True)
+        n_usdt = len(usdt_df)
+        print(f"      Writing USDT Master tab ({n_usdt:,} rows)...", end="", flush=True)
+        ws_usdt = wb.sheets["USDT Master"]
+        ws_usdt.clear()
+        if n_usdt > 0:
+            ws_usdt.range("A1").value = df_to_values(usdt_df)
+            format_sheet(ws_usdt, usdt_df)
+
+            # Column V — Spam? (same formula logic as LedgerData)
+            ws_usdt.range("V1").value = "Spam?"
+            ws_usdt.range("V1").api.Font.Bold = True
+            ws_usdt.range("V1").api.Interior.Color = HEADER_BG_COLOR
+            ws_usdt.range(f"V2:V{n_usdt + 1}").formula = (
+                '=IF(J2="Inflow",IF(L2>XLOOKUP(H2,_Lists!C:C,_Lists!E:E),"","Spam"),"")'
+            )
+
+            # Columns W, X, Y — running balance headers
+            for col_letter, header in [
+                ("W", "Opening Balance"),
+                ("X", "Inflow / (Outflow)"),
+                ("Y", "Closing Balance"),
+            ]:
+                cell = ws_usdt.range(f"{col_letter}1")
+                cell.value = header
+                cell.api.Font.Bold = True
+                cell.api.Interior.Color = HEADER_BG_COLOR
+
+            # Opening Balance: first row = 0; each subsequent row = previous Closing Balance
+            ws_usdt.range("W2").value = 0
+            if n_usdt > 1:
+                ws_usdt.range(f"W3:W{n_usdt + 1}").formula = "=Y2"
+
+            # Inflow / (Outflow): linked to Inflow / (Outflow) Amount in column U
+            ws_usdt.range(f"X2:X{n_usdt + 1}").formula = "=U2"
+
+            # Closing Balance: Opening Balance + Inflow / (Outflow)
+            ws_usdt.range(f"Y2:Y{n_usdt + 1}").formula = "=W2+X2"
+
+            # Apply number format to the three running-balance columns
+            for col_letter in ["W", "X", "Y"]:
+                ws_usdt.range(f"{col_letter}2:{col_letter}{n_usdt + 1}").api.NumberFormat = "#,##0.########"
+
+            # AutoFilter across A:Y — all 25 headers are present now
+            try:
+                if ws_usdt.api.AutoFilterMode:
+                    ws_usdt.api.AutoFilterMode = False
+            except Exception:
+                pass
+            ws_usdt.range("A1").api.AutoFilter(Field=1)
+        print(" done")
+
+    # ── ETH Master tab ────────────────────────────────────────────────────────
+    # Filter LedgerData for ETH and USDT_ERC20, sort chronologically, write
+    # values (A:V), then append running-balance formulas in W:Z.
+    if not ledger_df.empty and "ETH Master" in [s.name for s in wb.sheets]:
+        eth_df = ledger_df[ledger_df["Asset"].isin(["ETH", "USDT_ERC20"])].copy()
+        eth_df = eth_df.sort_values("ParsedDateUnrounded", na_position="last").reset_index(drop=True)
+        n_eth = len(eth_df)
+        print(f"      Writing ETH Master tab ({n_eth:,} rows)...", end="", flush=True)
+        ws_eth = wb.sheets["ETH Master"]
+        ws_eth.clear()
+        if n_eth > 0:
+            ws_eth.range("A1").value = df_to_values(eth_df)
+            format_sheet(ws_eth, eth_df)
+
+            # Column V — Spam? (same formula as LedgerData)
+            ws_eth.range("V1").value = "Spam?"
+            ws_eth.range("V1").api.Font.Bold = True
+            ws_eth.range("V1").api.Interior.Color = HEADER_BG_COLOR
+            ws_eth.range(f"V2:V{n_eth + 1}").formula = (
+                '=IF(J2="Inflow",IF(L2>XLOOKUP(H2,_Lists!C:C,_Lists!E:E),"","Spam"),"")'
+            )
+
+            # Columns W–Z headers
+            for col_letter, header in [
+                ("W", "Opening Balance"),
+                ("X", "Inflow / (Outflow)"),
+                ("Y", "Gas Fees"),
+                ("Z", "Closing Balance"),
+            ]:
+                cell = ws_eth.range(f"{col_letter}1")
+                cell.value = header
+                cell.api.Font.Bold = True
+                cell.api.Interior.Color = HEADER_BG_COLOR
+
+            # W — Opening Balance: first row = 0, each subsequent row = previous Closing Balance
+            ws_eth.range("W2").value = 0
+            if n_eth > 1:
+                ws_eth.range(f"W3:W{n_eth + 1}").formula = "=Z2"
+
+            # X — Inflow / (Outflow): ETH amount only; USDT_ERC20 rows contribute 0
+            ws_eth.range(f"X2:X{n_eth + 1}").formula = '=IF(G2="ETH",U2,0)'
+
+            # Y — Gas Fees: negative NetworkFee on Outflow rows where this vault
+            # (column C, VaultName) is an internal vault. References C (VaultName)
+            # rather than M (Source) to avoid double-counting internal transfers,
+            # and restricts to Outflow so only the sending side records the fee.
+            # Blank NetworkFee is treated as 0 by Excel arithmetic.
+            ws_eth.range(f"Y2:Y{n_eth + 1}").formula = (
+                '=IF(AND(COUNTIF(VaultData!$A:$A,C2)>0,J2="Outflow"),-S2,0)'
+            )
+
+            # Z — Closing Balance: W + X + Y
+            ws_eth.range(f"Z2:Z{n_eth + 1}").formula = "=W2+X2+Y2"
+
+            # Number format for W:Z data cells
+            for col_letter in ["W", "X", "Y", "Z"]:
+                ws_eth.range(f"{col_letter}2:{col_letter}{n_eth + 1}").api.NumberFormat = "#,##0.########"
+
+            # Freeze top row via COM (SplitRow=1 then FreezePanes=True)
+            ws_eth.api.Activate()
+            active_window = app.api.ActiveWindow
+            active_window.FreezePanes = False
+            active_window.SplitRow = 1
+            active_window.SplitColumn = 0
+            active_window.FreezePanes = True
+
+            # AutoFilter across A:Z — all 26 headers are present now
+            try:
+                if ws_eth.api.AutoFilterMode:
+                    ws_eth.api.AutoFilterMode = False
+            except Exception:
+                pass
+            ws_eth.range("A1").api.AutoFilter(Field=1)
+        print(" done")
+
+    # ── TRX Master tab ────────────────────────────────────────────────────────
+    # Filter LedgerData for TRX and TRX_USDT_S2UZ, sort chronologically, write
+    # values (A:V), then append running-balance formulas in W:Z.
+    if not ledger_df.empty and "TRX Master" in [s.name for s in wb.sheets]:
+        trx_df = ledger_df[ledger_df["Asset"].isin(["TRX", "TRX_USDT_S2UZ"])].copy()
+        trx_df = trx_df.sort_values("ParsedDateUnrounded", na_position="last").reset_index(drop=True)
+        n_trx = len(trx_df)
+        print(f"      Writing TRX Master tab ({n_trx:,} rows)...", end="", flush=True)
+        ws_trx = wb.sheets["TRX Master"]
+        ws_trx.clear()
+        if n_trx > 0:
+            ws_trx.range("A1").value = df_to_values(trx_df)
+            format_sheet(ws_trx, trx_df)
+
+            # Column V — Spam?
+            ws_trx.range("V1").value = "Spam?"
+            ws_trx.range("V1").api.Font.Bold = True
+            ws_trx.range("V1").api.Interior.Color = HEADER_BG_COLOR
+            ws_trx.range(f"V2:V{n_trx + 1}").formula = (
+                '=IF(J2="Inflow",IF(L2>XLOOKUP(H2,_Lists!C:C,_Lists!E:E),"","Spam"),"")'
+            )
+
+            # Columns W–Z headers
+            for col_letter, header in [
+                ("W", "Opening Balance"),
+                ("X", "Inflow / (Outflow)"),
+                ("Y", "Gas Fees"),
+                ("Z", "Closing Balance"),
+            ]:
+                cell = ws_trx.range(f"{col_letter}1")
+                cell.value = header
+                cell.api.Font.Bold = True
+                cell.api.Interior.Color = HEADER_BG_COLOR
+
+            # W — Opening Balance: first row = 0, each subsequent row = previous Closing Balance
+            ws_trx.range("W2").value = 0
+            if n_trx > 1:
+                ws_trx.range(f"W3:W{n_trx + 1}").formula = "=Z2"
+
+            # X — Inflow / (Outflow): TRX amount only; TRX_USDT_S2UZ rows contribute 0
+            ws_trx.range(f"X2:X{n_trx + 1}").formula = '=IF(G2="TRX",U2,0)'
+
+            # Y — Gas Fees: negative NetworkFee on Outflow rows where VaultName is
+            # an internal vault. Blank NetworkFee treated as 0 by Excel arithmetic.
+            ws_trx.range(f"Y2:Y{n_trx + 1}").formula = (
+                '=IF(AND(COUNTIF(VaultData!$A:$A,C2)>0,J2="Outflow"),-S2,0)'
+            )
+
+            # Z — Closing Balance: W + X + Y
+            ws_trx.range(f"Z2:Z{n_trx + 1}").formula = "=W2+X2+Y2"
+
+            # Number format for W:Z data cells
+            for col_letter in ["W", "X", "Y", "Z"]:
+                ws_trx.range(f"{col_letter}2:{col_letter}{n_trx + 1}").api.NumberFormat = "#,##0.########"
+
+            # Freeze top row
+            ws_trx.api.Activate()
+            active_window = app.api.ActiveWindow
+            active_window.FreezePanes = False
+            active_window.SplitRow = 1
+            active_window.SplitColumn = 0
+            active_window.FreezePanes = True
+
+            # AutoFilter across A:Z
+            try:
+                if ws_trx.api.AutoFilterMode:
+                    ws_trx.api.AutoFilterMode = False
+            except Exception:
+                pass
+            ws_trx.range("A1").api.AutoFilter(Field=1)
         print(" done")
 
     print("      Updating Vault Ledger dropdown...", end="", flush=True)
@@ -584,7 +805,13 @@ print()
 print("=" * 60)
 print("Refresh complete!")
 print("=" * 60)
+usdt_count = len(ledger_df[ledger_df["Asset Symbol"] == "USDT"]) if not ledger_df.empty else 0
+eth_count  = len(ledger_df[ledger_df["Asset"].isin(["ETH", "USDT_ERC20"])]) if not ledger_df.empty else 0
+trx_count  = len(ledger_df[ledger_df["Asset"].isin(["TRX", "TRX_USDT_S2UZ"])]) if not ledger_df.empty else 0
 print(f"  Data tab      : {len(tx_df):,} rows")
 print(f"  VaultData tab : {len(vault_df):,} rows")
 print(f"  LedgerData tab: {len(ledger_df):,} rows")
+print(f"  USDT Master   : {usdt_count:,} rows")
+print(f"  ETH Master    : {eth_count:,} rows")
+print(f"  TRX Master    : {trx_count:,} rows")
 print()
