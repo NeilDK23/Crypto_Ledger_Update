@@ -346,7 +346,7 @@ for col in ["Amount", "Network Fee", "Service Fee", "ParsedDate", "ParsedDateUnr
 
 # Drop transactions that never completed — these should not appear in the
 # Data tab or flow through to LedgerData.
-EXCLUDED_STATUSES = {"BLOCKED", "FAILED", "CANCELLED", "REJECTED"}
+EXCLUDED_STATUSES = {"BLOCKED", "FAILED", "CANCELLED", "REJECTED", "PENDING_SIGNATURE", "PENDING SIGNATURE"}
 before = len(tx_df)
 tx_df = tx_df[~tx_df["Status"].str.upper().isin(EXCLUDED_STATUSES)].reset_index(drop=True)
 excluded = before - len(tx_df)
@@ -517,7 +517,6 @@ try:
     # apply_autofilter(ws)        — enable column-header filter dropdowns
     for sheet_name, df, label, with_filter in [
         ("Data",       tx_df,     "Data",       True),
-        ("VaultData",  vault_df,  "VaultData",  False),
         ("LedgerData", ledger_df, "LedgerData", True),
     ]:
         print(f"      Writing {label} tab ({len(df):,} rows)...", end="", flush=True)
@@ -528,6 +527,27 @@ try:
         if with_filter:
             apply_autofilter(ws)
         print(" done")
+
+    # ── VaultData: partial write to preserve H:K recon columns ───────────────
+    # Only clear the columns the script writes (A through vault_df's last column)
+    # using a large row count so stale rows from a prior run are removed.
+    # Columns H-K (user-built recon) are never touched.
+    print("      Writing VaultData tab...", end="", flush=True)
+    ws_vd = wb.sheets["VaultData"]
+    n_vd_cols = len(vault_df.columns)
+    ws_vd.range((1, 1), (10000, n_vd_cols)).clear()
+    ws_vd.range("A1").value = df_to_values(vault_df)
+    format_sheet(ws_vd, vault_df)
+    # AutoFilter across A:K; filter column J (Difference) to hide zeros and blanks.
+    # xlAnd = 1: show rows where J is not zero AND not blank.
+    try:
+        if ws_vd.api.AutoFilterMode:
+            ws_vd.api.AutoFilterMode = False
+    except Exception:
+        pass
+    ws_vd.range("A1").api.AutoFilter(Field=1)
+    ws_vd.range("A1").api.AutoFilter(Field=10, Criteria1="<>0", Operator=1, Criteria2="<>")
+    print(" done")
 
     # ── LedgerData column U: "Spam?" header + per-row formula ────────────────
     # ws.clear() above wipes column U, so the header and formulas are rewritten here.
