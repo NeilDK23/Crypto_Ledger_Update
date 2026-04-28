@@ -63,7 +63,9 @@ NUMBER_FORMATS = {
 DEFAULT_NUMERIC_FORMAT = "#,##0.##"
 
 # Header row background colour — light steel blue-grey (RGB hex, BGR byte order for COM)
-HEADER_BG_COLOR = 0xD6DCE4
+HEADER_BG_COLOR   = 0xD6DCE4
+BALANCE_COL_COLOR = 0xE6D8AD   # light blue  (#ADD8E6) — running-balance columns (W–Z)
+ZAR_COL_COLOR     = 0xE9D2D9   # light purple (#D9D2E9) — ZAR conversion columns (AA onward)
 
 # Maps the Fireblocks 'Asset' field (network identifier) to a display network name.
 # Only USDT variants carry a network label; everything else shows blank.
@@ -531,28 +533,65 @@ try:
             apply_autofilter(ws)
         print(" done")
 
-    # ── VaultData: partial write to preserve H:K recon columns ───────────────
-    # Only clear the columns the script writes (A through vault_df's last column)
+    # ── VaultData: partial write to preserve recon columns ───────────────────
+    # Clear the columns the script writes (A through vault_df's last column)
     # using a large row count so stale rows from a prior run are removed.
-    # Columns H-K (user-built recon) are never touched.
+    # Columns H-N (recon) are cleared from row 2 downward and rewritten below.
     print("      Writing VaultData tab...", end="", flush=True)
     ws_vd = wb.sheets["VaultData"]
     n_vd_cols = len(vault_df.columns)
+    n_vd = len(vault_df)
     ws_vd.range((1, 1), (10000, n_vd_cols)).clear()
+    ws_vd.range("H2:N10000").clear()
     ws_vd.range("A1").value = df_to_values(vault_df)
     format_sheet(ws_vd, vault_df)
-    # AutoFilter across A:K; filter column J (Difference) to hide zeros and blanks.
-    # xlAnd = 1: show rows where J is not zero AND not blank.
+
+    # Row 1 headers for recon columns H–N (light blue background)
+    recon_headers = [
+        "Accepted Currency?", "Inflows / (Outflows)", "Less: Gas Fees",
+        "Less: Service Fees", "Net Balance per Ledger_Data", "Difference", "Difference %",
+    ]
+    ws_vd.range("H1").value = recon_headers
+    hdr_recon = ws_vd.range("H1:N1")
+    hdr_recon.api.Font.Bold = True
+    hdr_recon.api.Interior.Color = BALANCE_COL_COLOR
+
+    # Columns H–N: recon formulas filled down for all vault rows
+    if n_vd > 0:
+        ws_vd.range(f"H2:H{n_vd + 1}").formula = (
+            '=IF(COUNTIF(_Lists!$C$2:$C$51,XLOOKUP(C2,Data!E:E,Data!F:F))>=1,"Accepted","Spam")'
+        )
+        ws_vd.range(f"I2:I{n_vd + 1}").formula = (
+            '=IF(H2="Accepted",SUMIFS(LedgerData!$U:$U,LedgerData!$C:$C,A2,LedgerData!$G:$G,C2),"")'
+        )
+        ws_vd.range(f"J2:J{n_vd + 1}").formula = (
+            '=IF(C2="ETH",'
+            '-SUMIFS(LedgerData!S:S,LedgerData!C:C,A2,LedgerData!G:G,"USDT_ERC20",LedgerData!J:J,"Outflow")'
+            '-SUMIFS(LedgerData!S:S,LedgerData!C:C,A2,LedgerData!G:G,"ETH",LedgerData!J:J,"Outflow"),'
+            'IF(C2="TRX",'
+            '-SUMIFS(LedgerData!S:S,LedgerData!C:C,A2,LedgerData!G:G,"TRX_USDT_S2UZ",LedgerData!J:J,"Outflow")'
+            '-SUMIFS(LedgerData!S:S,LedgerData!C:C,A2,LedgerData!G:G,"TRX",LedgerData!J:J,"Outflow"),'
+            '0))'
+        )
+        ws_vd.range(f"K2:K{n_vd + 1}").formula = (
+            '=-SUMIFS(LedgerData!$T:$T,LedgerData!$C:$C,A2,LedgerData!$G:$G,C2)'
+        )
+        ws_vd.range(f"L2:L{n_vd + 1}").formula = "=IFERROR(SUM(I2:K2),0)"
+        ws_vd.range(f"M2:M{n_vd + 1}").formula = '=IF(H2="Accepted",L2-E2,"")'
+        ws_vd.range(f"N2:N{n_vd + 1}").formula = '=IFERROR(M2/E2,"")'
+
+        for col in ["I", "J", "K", "L", "M"]:
+            ws_vd.range(f"{col}2:{col}{n_vd + 1}").api.NumberFormat = "#,##0.##"
+        ws_vd.range(f"N2:N{n_vd + 1}").api.NumberFormat = "0.00%"
+
     try:
         if ws_vd.api.AutoFilterMode:
             ws_vd.api.AutoFilterMode = False
     except Exception:
         pass
     ws_vd.range("A1").api.AutoFilter(Field=1)
-    # Field=13 targets column M (Difference) in the updated VaultData recon layout:
-    # H=Accepted Currency?, I=Gas Fees, J=Gross Balance, K=Less Gas Fees,
-    # L=Net Balance, M=Difference, N=Difference %
-    ws_vd.range("A1").api.AutoFilter(Field=13, Criteria1="<>0", Operator=1, Criteria2="<>")
+    # Second filter on column E (Total Balance): hide zero and blank rows
+    ws_vd.range("A1").api.AutoFilter(Field=5, Criteria1="<>0", Operator=1, Criteria2="<>")
     print(" done")
 
     # ── LedgerData column U: "Spam?" header + per-row formula ────────────────
@@ -602,33 +641,56 @@ try:
                 '=IF(J2="Inflow",IF(L2>XLOOKUP(H2,_Lists!C:C,_Lists!E:E),"","Spam"),"")'
             )
 
-            # Columns W, X, Y — running balance headers
+            # Columns W, X, Y, Z — running balance headers (light blue)
             for col_letter, header in [
                 ("W", "Opening Balance"),
                 ("X", "Inflow / (Outflow)"),
-                ("Y", "Closing Balance"),
+                ("Y", "Service Fees"),
+                ("Z", "Closing Balance"),
             ]:
                 cell = ws_usdt.range(f"{col_letter}1")
                 cell.value = header
                 cell.api.Font.Bold = True
-                cell.api.Interior.Color = HEADER_BG_COLOR
+                cell.api.Interior.Color = BALANCE_COL_COLOR
 
             # Opening Balance: first row = 0; each subsequent row = previous Closing Balance
             ws_usdt.range("W2").value = 0
             if n_usdt > 1:
-                ws_usdt.range(f"W3:W{n_usdt + 1}").formula = "=Y2"
+                ws_usdt.range(f"W3:W{n_usdt + 1}").formula = "=Z2"
 
             # Inflow / (Outflow): linked to Inflow / (Outflow) Amount in column U
             ws_usdt.range(f"X2:X{n_usdt + 1}").formula = "=U2"
 
-            # Closing Balance: Opening Balance + Inflow / (Outflow)
-            ws_usdt.range(f"Y2:Y{n_usdt + 1}").formula = "=W2+X2"
+            # Service Fees: negative of service fee amount
+            ws_usdt.range(f"Y2:Y{n_usdt + 1}").formula = "=-T2"
 
-            # Apply number format to the three running-balance columns
-            for col_letter in ["W", "X", "Y"]:
+            # Closing Balance: Opening Balance + Inflow / (Outflow) + Service Fees
+            ws_usdt.range(f"Z2:Z{n_usdt + 1}").formula = "=W2+X2+Y2"
+
+            # Apply number format to the four running-balance columns
+            for col_letter in ["W", "X", "Y", "Z"]:
                 ws_usdt.range(f"{col_letter}2:{col_letter}{n_usdt + 1}").api.NumberFormat = "#,##0.########"
 
-            # AutoFilter across A:Y — all 25 headers are present now
+            # Columns AA, AB, AC — ZAR conversion columns (light purple)
+            for col_letter, header in [
+                ("AA", "USDT ZAR"),
+                ("AB", "Inflow / (Outflow) ZAR"),
+                ("AC", "Service fee (ZAR)"),
+            ]:
+                cell = ws_usdt.range(f"{col_letter}1")
+                cell.value = header
+                cell.api.Font.Bold = True
+                cell.api.Interior.Color = ZAR_COL_COLOR
+
+            ws_usdt.range(f"AA2:AA{n_usdt + 1}").formula = (
+                "=XLOOKUP(F2,'SA Exchange Rate Master'!A:A,'SA Exchange Rate Master'!C:C,\"Check rate\")"
+            )
+            ws_usdt.range(f"AB2:AB{n_usdt + 1}").formula = "=X2*AA2"
+            ws_usdt.range(f"AC2:AC{n_usdt + 1}").formula = "=Y2*AA2"
+            for col_letter in ["AA", "AB", "AC"]:
+                ws_usdt.range(f"{col_letter}2:{col_letter}{n_usdt + 1}").api.NumberFormat = "#,##0.##"
+
+            # AutoFilter across A:AC — all 29 headers are present now
             try:
                 if ws_usdt.api.AutoFilterMode:
                     ws_usdt.api.AutoFilterMode = False
@@ -659,7 +721,7 @@ try:
                 '=IF(J2="Inflow",IF(L2>XLOOKUP(H2,_Lists!C:C,_Lists!E:E),"","Spam"),"")'
             )
 
-            # Columns W–Z headers
+            # Columns W–Z headers (light blue)
             for col_letter, header in [
                 ("W", "Opening Balance"),
                 ("X", "Inflow / (Outflow)"),
@@ -669,7 +731,7 @@ try:
                 cell = ws_eth.range(f"{col_letter}1")
                 cell.value = header
                 cell.api.Font.Bold = True
-                cell.api.Interior.Color = HEADER_BG_COLOR
+                cell.api.Interior.Color = BALANCE_COL_COLOR
 
             # W — Opening Balance: first row = 0, each subsequent row = previous Closing Balance
             ws_eth.range("W2").value = 0
@@ -695,6 +757,25 @@ try:
             for col_letter in ["W", "X", "Y", "Z"]:
                 ws_eth.range(f"{col_letter}2:{col_letter}{n_eth + 1}").api.NumberFormat = "#,##0.########"
 
+            # Columns AA, AB, AC — ZAR conversion columns (light purple)
+            for col_letter, header in [
+                ("AA", "ETH/ZAR"),
+                ("AB", "Inflow / (Outflow) ZAR"),
+                ("AC", "Lume Gas Fees (ZAR)"),
+            ]:
+                cell = ws_eth.range(f"{col_letter}1")
+                cell.value = header
+                cell.api.Font.Bold = True
+                cell.api.Interior.Color = ZAR_COL_COLOR
+
+            ws_eth.range(f"AA2:AA{n_eth + 1}").formula = (
+                "=XLOOKUP(F2,'SA Exchange Rate Master'!A:A,'SA Exchange Rate Master'!D:D,\"Check rate\")"
+            )
+            ws_eth.range(f"AB2:AB{n_eth + 1}").formula = "=X2*AA2"
+            ws_eth.range(f"AC2:AC{n_eth + 1}").formula = "=Y2*AA2"
+            for col_letter in ["AA", "AB", "AC"]:
+                ws_eth.range(f"{col_letter}2:{col_letter}{n_eth + 1}").api.NumberFormat = "#,##0.##"
+
             # Freeze top row via COM (SplitRow=1 then FreezePanes=True)
             ws_eth.api.Activate()
             active_window = app.api.ActiveWindow
@@ -703,7 +784,7 @@ try:
             active_window.SplitColumn = 0
             active_window.FreezePanes = True
 
-            # AutoFilter across A:Z — all 26 headers are present now
+            # AutoFilter across A:AC — all 29 headers are present now
             try:
                 if ws_eth.api.AutoFilterMode:
                     ws_eth.api.AutoFilterMode = False
@@ -734,7 +815,7 @@ try:
                 '=IF(J2="Inflow",IF(L2>XLOOKUP(H2,_Lists!C:C,_Lists!E:E),"","Spam"),"")'
             )
 
-            # Columns W–Z headers
+            # Columns W–Z headers (light blue)
             for col_letter, header in [
                 ("W", "Opening Balance"),
                 ("X", "Inflow / (Outflow)"),
@@ -744,7 +825,7 @@ try:
                 cell = ws_trx.range(f"{col_letter}1")
                 cell.value = header
                 cell.api.Font.Bold = True
-                cell.api.Interior.Color = HEADER_BG_COLOR
+                cell.api.Interior.Color = BALANCE_COL_COLOR
 
             # W — Opening Balance: first row = 0, each subsequent row = previous Closing Balance
             ws_trx.range("W2").value = 0
@@ -767,6 +848,25 @@ try:
             for col_letter in ["W", "X", "Y", "Z"]:
                 ws_trx.range(f"{col_letter}2:{col_letter}{n_trx + 1}").api.NumberFormat = "#,##0.########"
 
+            # Columns AA, AB, AC — ZAR conversion columns (light purple)
+            for col_letter, header in [
+                ("AA", "TRX/ZAR"),
+                ("AB", "Inflow / (Outflow) ZAR"),
+                ("AC", "Lume Gas Fees (ZAR)"),
+            ]:
+                cell = ws_trx.range(f"{col_letter}1")
+                cell.value = header
+                cell.api.Font.Bold = True
+                cell.api.Interior.Color = ZAR_COL_COLOR
+
+            ws_trx.range(f"AA2:AA{n_trx + 1}").formula = (
+                "=XLOOKUP(F2,'SA Exchange Rate Master'!A:A,'SA Exchange Rate Master'!E:E,\"Check rate\")"
+            )
+            ws_trx.range(f"AB2:AB{n_trx + 1}").formula = "=X2*AA2"
+            ws_trx.range(f"AC2:AC{n_trx + 1}").formula = "=Y2*AA2"
+            for col_letter in ["AA", "AB", "AC"]:
+                ws_trx.range(f"{col_letter}2:{col_letter}{n_trx + 1}").api.NumberFormat = "#,##0.##"
+
             # Freeze top row
             ws_trx.api.Activate()
             active_window = app.api.ActiveWindow
@@ -775,7 +875,7 @@ try:
             active_window.SplitColumn = 0
             active_window.FreezePanes = True
 
-            # AutoFilter across A:Z
+            # AutoFilter across A:AC
             try:
                 if ws_trx.api.AutoFilterMode:
                     ws_trx.api.AutoFilterMode = False
