@@ -178,6 +178,30 @@ def read_accepted_currencies(wb):
     return {str(v).strip() for v in values if v is not None and str(v).strip()}
 
 
+def read_excluded_vaults(wb):
+    """
+    Read vault names to exclude from _Lists sheet, Column H (H2 down).
+    These vaults are omitted from the three Lumetrade Master tabs but remain
+    in the standard Master tabs.
+    Returns a set of strings, or an empty set if the column is blank or the
+    _Lists sheet doesn't exist yet.
+    """
+    LISTS_SHEET = "_Lists"
+    if LISTS_SHEET not in [s.name for s in wb.sheets]:
+        return set()
+
+    ws = wb.sheets[LISTS_SHEET]
+
+    if ws.range("H2").value is None:
+        return set()
+
+    values = ws.range("H2").expand("down").value
+    if not isinstance(values, list):
+        values = [values]
+
+    return {str(v).strip() for v in values if v is not None and str(v).strip()}
+
+
 def setup_vault_ledger_dropdown(wb, vault_names):
     """
     Keeps the Account Name dropdown in 'Vault Ledger'!C3 up to date.
@@ -488,6 +512,7 @@ if os.path.exists(lock_file):
 # visible=False keeps the Excel window hidden while the script runs.
 # The try/finally block ensures the Excel process is always cleaned up,
 # even if the script crashes partway through.
+excluded_vaults = set()   # populated inside the try block after the workbook opens
 app = xw.App(visible=False)
 try:
     wb = app.books.open(full_path)
@@ -496,6 +521,9 @@ try:
     # ── Read accepted currencies from _Lists!C before the sheet is cleared ────
     # This must happen here — setup_vault_ledger_dropdown clears _Lists later.
     accepted_currencies = read_accepted_currencies(wb)
+    excluded_vaults     = read_excluded_vaults(wb)
+    if excluded_vaults:
+        print(f"      Excluded vaults (Lumetrade): {', '.join(sorted(excluded_vaults))}")
     if accepted_currencies:
         print(f"      Accepted currencies: {', '.join(sorted(accepted_currencies))}")
 
@@ -699,6 +727,73 @@ try:
             ws_usdt.range("A1").api.AutoFilter(Field=1)
         print(" done")
 
+    # ── USDT Lumetrade Master tab ─────────────────────────────────────────────
+    # Same as USDT Master but with excluded_vaults removed from VaultName (col C).
+    if not ledger_df.empty and "USDT Lumetrade Master" in [s.name for s in wb.sheets]:
+        usdt_lt_df = usdt_df[~usdt_df["VaultName"].isin(excluded_vaults)].copy().reset_index(drop=True)
+        n_usdt_lt = len(usdt_lt_df)
+        print(f"      Writing USDT Lumetrade Master tab ({n_usdt_lt:,} rows)...", end="", flush=True)
+        ws_usdt_lt = wb.sheets["USDT Lumetrade Master"]
+        ws_usdt_lt.clear()
+        if n_usdt_lt > 0:
+            ws_usdt_lt.range("A1").value = df_to_values(usdt_lt_df)
+            format_sheet(ws_usdt_lt, usdt_lt_df)
+
+            ws_usdt_lt.range("V1").value = "Spam?"
+            ws_usdt_lt.range("V1").api.Font.Bold = True
+            ws_usdt_lt.range("V1").api.Interior.Color = HEADER_BG_COLOR
+            ws_usdt_lt.range(f"V2:V{n_usdt_lt + 1}").formula = (
+                '=IF(J2="Inflow",IF(L2>XLOOKUP(H2,_Lists!C:C,_Lists!E:E),"","Spam"),"")'
+            )
+
+            for col_letter, header in [
+                ("W", "Opening Balance"),
+                ("X", "Inflow / (Outflow)"),
+                ("Y", "Service Fees"),
+                ("Z", "Closing Balance"),
+            ]:
+                cell = ws_usdt_lt.range(f"{col_letter}1")
+                cell.value = header
+                cell.api.Font.Bold = True
+                cell.api.Interior.Color = BALANCE_COL_COLOR
+
+            ws_usdt_lt.range("W2").value = 0
+            if n_usdt_lt > 1:
+                ws_usdt_lt.range(f"W3:W{n_usdt_lt + 1}").formula = "=Z2"
+
+            ws_usdt_lt.range(f"X2:X{n_usdt_lt + 1}").formula = "=U2"
+            ws_usdt_lt.range(f"Y2:Y{n_usdt_lt + 1}").formula = "=-T2"
+            ws_usdt_lt.range(f"Z2:Z{n_usdt_lt + 1}").formula = "=W2+X2+Y2"
+
+            for col_letter in ["W", "X", "Y", "Z"]:
+                ws_usdt_lt.range(f"{col_letter}2:{col_letter}{n_usdt_lt + 1}").api.NumberFormat = "#,##0.########"
+
+            for col_letter, header in [
+                ("AA", "USDT ZAR"),
+                ("AB", "Inflow / (Outflow) ZAR"),
+                ("AC", "Service fee (ZAR)"),
+            ]:
+                cell = ws_usdt_lt.range(f"{col_letter}1")
+                cell.value = header
+                cell.api.Font.Bold = True
+                cell.api.Interior.Color = ZAR_COL_COLOR
+
+            ws_usdt_lt.range(f"AA2:AA{n_usdt_lt + 1}").formula = (
+                "=XLOOKUP(F2,'SA Exchange Rate Master'!A:A,'SA Exchange Rate Master'!C:C,\"Check rate\")"
+            )
+            ws_usdt_lt.range(f"AB2:AB{n_usdt_lt + 1}").formula = "=X2*AA2"
+            ws_usdt_lt.range(f"AC2:AC{n_usdt_lt + 1}").formula = "=Y2*AA2"
+            for col_letter in ["AA", "AB", "AC"]:
+                ws_usdt_lt.range(f"{col_letter}2:{col_letter}{n_usdt_lt + 1}").api.NumberFormat = "#,##0.##"
+
+            try:
+                if ws_usdt_lt.api.AutoFilterMode:
+                    ws_usdt_lt.api.AutoFilterMode = False
+            except Exception:
+                pass
+            ws_usdt_lt.range("A1").api.AutoFilter(Field=1)
+        print(" done")
+
     # ── ETH Master tab ────────────────────────────────────────────────────────
     # Filter LedgerData for ETH and USDT_ERC20, sort chronologically, write
     # values (A:V), then append running-balance formulas in W:Z.
@@ -721,12 +816,13 @@ try:
                 '=IF(J2="Inflow",IF(L2>XLOOKUP(H2,_Lists!C:C,_Lists!E:E),"","Spam"),"")'
             )
 
-            # Columns W–Z headers (light blue)
+            # Columns W–AA headers (light blue)
             for col_letter, header in [
-                ("W", "Opening Balance"),
-                ("X", "Inflow / (Outflow)"),
-                ("Y", "Gas Fees"),
-                ("Z", "Closing Balance"),
+                ("W",  "Opening Balance"),
+                ("X",  "Inflow / (Outflow)"),
+                ("Y",  "Gas Fees"),
+                ("Z",  "Service Fees"),
+                ("AA", "Closing Balance"),
             ]:
                 cell = ws_eth.range(f"{col_letter}1")
                 cell.value = header
@@ -736,7 +832,7 @@ try:
             # W — Opening Balance: first row = 0, each subsequent row = previous Closing Balance
             ws_eth.range("W2").value = 0
             if n_eth > 1:
-                ws_eth.range(f"W3:W{n_eth + 1}").formula = "=Z2"
+                ws_eth.range(f"W3:W{n_eth + 1}").formula = "=AA2"
 
             # X — Inflow / (Outflow): ETH amount only; USDT_ERC20 rows contribute 0
             ws_eth.range(f"X2:X{n_eth + 1}").formula = '=IF(G2="ETH",U2,0)'
@@ -750,30 +846,35 @@ try:
                 '=IF(AND(COUNTIF(VaultData!$A:$A,C2)>0,J2="Outflow"),-S2,0)'
             )
 
-            # Z — Closing Balance: W + X + Y
-            ws_eth.range(f"Z2:Z{n_eth + 1}").formula = "=W2+X2+Y2"
+            # Z — Service Fees: ETH rows only
+            ws_eth.range(f"Z2:Z{n_eth + 1}").formula = '=IF(G2="ETH",-T2,0)'
 
-            # Number format for W:Z data cells
-            for col_letter in ["W", "X", "Y", "Z"]:
+            # AA — Closing Balance: W + X + Y + Z
+            ws_eth.range(f"AA2:AA{n_eth + 1}").formula = "=SUM(W2:Z2)"
+
+            # Number format for W:AA data cells
+            for col_letter in ["W", "X", "Y", "Z", "AA"]:
                 ws_eth.range(f"{col_letter}2:{col_letter}{n_eth + 1}").api.NumberFormat = "#,##0.########"
 
-            # Columns AA, AB, AC — ZAR conversion columns (light purple)
+            # Columns AB, AC, AD, AE — ZAR conversion columns (light purple)
             for col_letter, header in [
-                ("AA", "ETH/ZAR"),
-                ("AB", "Inflow / (Outflow) ZAR"),
-                ("AC", "Lume Gas Fees (ZAR)"),
+                ("AB", "ETH/ZAR"),
+                ("AC", "Inflow / (Outflow) ZAR"),
+                ("AD", "Lume Gas Fees (ZAR)"),
+                ("AE", "Service Fees ZAR"),
             ]:
                 cell = ws_eth.range(f"{col_letter}1")
                 cell.value = header
                 cell.api.Font.Bold = True
                 cell.api.Interior.Color = ZAR_COL_COLOR
 
-            ws_eth.range(f"AA2:AA{n_eth + 1}").formula = (
+            ws_eth.range(f"AB2:AB{n_eth + 1}").formula = (
                 "=XLOOKUP(F2,'SA Exchange Rate Master'!A:A,'SA Exchange Rate Master'!D:D,\"Check rate\")"
             )
-            ws_eth.range(f"AB2:AB{n_eth + 1}").formula = "=X2*AA2"
-            ws_eth.range(f"AC2:AC{n_eth + 1}").formula = "=Y2*AA2"
-            for col_letter in ["AA", "AB", "AC"]:
+            ws_eth.range(f"AC2:AC{n_eth + 1}").formula = "=X2*AB2"
+            ws_eth.range(f"AD2:AD{n_eth + 1}").formula = "=Y2*AB2"
+            ws_eth.range(f"AE2:AE{n_eth + 1}").formula = "=Z2*AB2"
+            for col_letter in ["AB", "AC", "AD", "AE"]:
                 ws_eth.range(f"{col_letter}2:{col_letter}{n_eth + 1}").api.NumberFormat = "#,##0.##"
 
             # Freeze top row via COM (SplitRow=1 then FreezePanes=True)
@@ -784,13 +885,93 @@ try:
             active_window.SplitColumn = 0
             active_window.FreezePanes = True
 
-            # AutoFilter across A:AC — all 29 headers are present now
+            # AutoFilter across A:AE — all 31 headers are present now
             try:
                 if ws_eth.api.AutoFilterMode:
                     ws_eth.api.AutoFilterMode = False
             except Exception:
                 pass
             ws_eth.range("A1").api.AutoFilter(Field=1)
+        print(" done")
+
+    # ── ETH Lumetrade Master tab ──────────────────────────────────────────────
+    # Same as ETH Master but with excluded_vaults removed from VaultName (col C).
+    if not ledger_df.empty and "ETH Lumetrade Master" in [s.name for s in wb.sheets]:
+        eth_lt_df = eth_df[~eth_df["VaultName"].isin(excluded_vaults)].copy().reset_index(drop=True)
+        n_eth_lt = len(eth_lt_df)
+        print(f"      Writing ETH Lumetrade Master tab ({n_eth_lt:,} rows)...", end="", flush=True)
+        ws_eth_lt = wb.sheets["ETH Lumetrade Master"]
+        ws_eth_lt.clear()
+        if n_eth_lt > 0:
+            ws_eth_lt.range("A1").value = df_to_values(eth_lt_df)
+            format_sheet(ws_eth_lt, eth_lt_df)
+
+            ws_eth_lt.range("V1").value = "Spam?"
+            ws_eth_lt.range("V1").api.Font.Bold = True
+            ws_eth_lt.range("V1").api.Interior.Color = HEADER_BG_COLOR
+            ws_eth_lt.range(f"V2:V{n_eth_lt + 1}").formula = (
+                '=IF(J2="Inflow",IF(L2>XLOOKUP(H2,_Lists!C:C,_Lists!E:E),"","Spam"),"")'
+            )
+
+            for col_letter, header in [
+                ("W",  "Opening Balance"),
+                ("X",  "Inflow / (Outflow)"),
+                ("Y",  "Gas Fees"),
+                ("Z",  "Service Fees"),
+                ("AA", "Closing Balance"),
+            ]:
+                cell = ws_eth_lt.range(f"{col_letter}1")
+                cell.value = header
+                cell.api.Font.Bold = True
+                cell.api.Interior.Color = BALANCE_COL_COLOR
+
+            ws_eth_lt.range("W2").value = 0
+            if n_eth_lt > 1:
+                ws_eth_lt.range(f"W3:W{n_eth_lt + 1}").formula = "=AA2"
+
+            ws_eth_lt.range(f"X2:X{n_eth_lt + 1}").formula = '=IF(G2="ETH",U2,0)'
+            ws_eth_lt.range(f"Y2:Y{n_eth_lt + 1}").formula = (
+                '=IF(AND(COUNTIF(VaultData!$A:$A,C2)>0,J2="Outflow"),-S2,0)'
+            )
+            ws_eth_lt.range(f"Z2:Z{n_eth_lt + 1}").formula = '=IF(G2="ETH",-T2,0)'
+            ws_eth_lt.range(f"AA2:AA{n_eth_lt + 1}").formula = "=SUM(W2:Z2)"
+
+            for col_letter in ["W", "X", "Y", "Z", "AA"]:
+                ws_eth_lt.range(f"{col_letter}2:{col_letter}{n_eth_lt + 1}").api.NumberFormat = "#,##0.########"
+
+            for col_letter, header in [
+                ("AB", "ETH/ZAR"),
+                ("AC", "Inflow / (Outflow) ZAR"),
+                ("AD", "Lume Gas Fees (ZAR)"),
+                ("AE", "Service Fees ZAR"),
+            ]:
+                cell = ws_eth_lt.range(f"{col_letter}1")
+                cell.value = header
+                cell.api.Font.Bold = True
+                cell.api.Interior.Color = ZAR_COL_COLOR
+
+            ws_eth_lt.range(f"AB2:AB{n_eth_lt + 1}").formula = (
+                "=XLOOKUP(F2,'SA Exchange Rate Master'!A:A,'SA Exchange Rate Master'!D:D,\"Check rate\")"
+            )
+            ws_eth_lt.range(f"AC2:AC{n_eth_lt + 1}").formula = "=X2*AB2"
+            ws_eth_lt.range(f"AD2:AD{n_eth_lt + 1}").formula = "=Y2*AB2"
+            ws_eth_lt.range(f"AE2:AE{n_eth_lt + 1}").formula = "=Z2*AB2"
+            for col_letter in ["AB", "AC", "AD", "AE"]:
+                ws_eth_lt.range(f"{col_letter}2:{col_letter}{n_eth_lt + 1}").api.NumberFormat = "#,##0.##"
+
+            ws_eth_lt.api.Activate()
+            active_window = app.api.ActiveWindow
+            active_window.FreezePanes = False
+            active_window.SplitRow = 1
+            active_window.SplitColumn = 0
+            active_window.FreezePanes = True
+
+            try:
+                if ws_eth_lt.api.AutoFilterMode:
+                    ws_eth_lt.api.AutoFilterMode = False
+            except Exception:
+                pass
+            ws_eth_lt.range("A1").api.AutoFilter(Field=1)
         print(" done")
 
     # ── TRX Master tab ────────────────────────────────────────────────────────
@@ -815,12 +996,13 @@ try:
                 '=IF(J2="Inflow",IF(L2>XLOOKUP(H2,_Lists!C:C,_Lists!E:E),"","Spam"),"")'
             )
 
-            # Columns W–Z headers (light blue)
+            # Columns W–AA headers (light blue)
             for col_letter, header in [
-                ("W", "Opening Balance"),
-                ("X", "Inflow / (Outflow)"),
-                ("Y", "Gas Fees"),
-                ("Z", "Closing Balance"),
+                ("W",  "Opening Balance"),
+                ("X",  "Inflow / (Outflow)"),
+                ("Y",  "Gas Fees"),
+                ("Z",  "Service Fees"),
+                ("AA", "Closing Balance"),
             ]:
                 cell = ws_trx.range(f"{col_letter}1")
                 cell.value = header
@@ -830,7 +1012,7 @@ try:
             # W — Opening Balance: first row = 0, each subsequent row = previous Closing Balance
             ws_trx.range("W2").value = 0
             if n_trx > 1:
-                ws_trx.range(f"W3:W{n_trx + 1}").formula = "=Z2"
+                ws_trx.range(f"W3:W{n_trx + 1}").formula = "=AA2"
 
             # X — Inflow / (Outflow): TRX amount only; TRX_USDT_S2UZ rows contribute 0
             ws_trx.range(f"X2:X{n_trx + 1}").formula = '=IF(G2="TRX",U2,0)'
@@ -841,30 +1023,35 @@ try:
                 '=IF(AND(COUNTIF(VaultData!$A:$A,C2)>0,J2="Outflow"),-S2,0)'
             )
 
-            # Z — Closing Balance: W + X + Y
-            ws_trx.range(f"Z2:Z{n_trx + 1}").formula = "=W2+X2+Y2"
+            # Z — Service Fees: TRX rows only
+            ws_trx.range(f"Z2:Z{n_trx + 1}").formula = '=IF(G2="TRX",-T2,0)'
 
-            # Number format for W:Z data cells
-            for col_letter in ["W", "X", "Y", "Z"]:
+            # AA — Closing Balance: W + X + Y + Z
+            ws_trx.range(f"AA2:AA{n_trx + 1}").formula = "=SUM(W2:Z2)"
+
+            # Number format for W:AA data cells
+            for col_letter in ["W", "X", "Y", "Z", "AA"]:
                 ws_trx.range(f"{col_letter}2:{col_letter}{n_trx + 1}").api.NumberFormat = "#,##0.########"
 
-            # Columns AA, AB, AC — ZAR conversion columns (light purple)
+            # Columns AB, AC, AD, AE — ZAR conversion columns (light purple)
             for col_letter, header in [
-                ("AA", "TRX/ZAR"),
-                ("AB", "Inflow / (Outflow) ZAR"),
-                ("AC", "Lume Gas Fees (ZAR)"),
+                ("AB", "TRX/ZAR"),
+                ("AC", "Inflow / (Outflow) ZAR"),
+                ("AD", "Lume Gas Fees (ZAR)"),
+                ("AE", "Service Fees ZAR"),
             ]:
                 cell = ws_trx.range(f"{col_letter}1")
                 cell.value = header
                 cell.api.Font.Bold = True
                 cell.api.Interior.Color = ZAR_COL_COLOR
 
-            ws_trx.range(f"AA2:AA{n_trx + 1}").formula = (
+            ws_trx.range(f"AB2:AB{n_trx + 1}").formula = (
                 "=XLOOKUP(F2,'SA Exchange Rate Master'!A:A,'SA Exchange Rate Master'!E:E,\"Check rate\")"
             )
-            ws_trx.range(f"AB2:AB{n_trx + 1}").formula = "=X2*AA2"
-            ws_trx.range(f"AC2:AC{n_trx + 1}").formula = "=Y2*AA2"
-            for col_letter in ["AA", "AB", "AC"]:
+            ws_trx.range(f"AC2:AC{n_trx + 1}").formula = "=X2*AB2"
+            ws_trx.range(f"AD2:AD{n_trx + 1}").formula = "=Y2*AB2"
+            ws_trx.range(f"AE2:AE{n_trx + 1}").formula = "=Z2*AB2"
+            for col_letter in ["AB", "AC", "AD", "AE"]:
                 ws_trx.range(f"{col_letter}2:{col_letter}{n_trx + 1}").api.NumberFormat = "#,##0.##"
 
             # Freeze top row
@@ -875,13 +1062,93 @@ try:
             active_window.SplitColumn = 0
             active_window.FreezePanes = True
 
-            # AutoFilter across A:AC
+            # AutoFilter across A:AE
             try:
                 if ws_trx.api.AutoFilterMode:
                     ws_trx.api.AutoFilterMode = False
             except Exception:
                 pass
             ws_trx.range("A1").api.AutoFilter(Field=1)
+        print(" done")
+
+    # ── TRX Lumetrade Master tab ──────────────────────────────────────────────
+    # Same as TRX Master but with excluded_vaults removed from VaultName (col C).
+    if not ledger_df.empty and "TRX Lumetrade Master" in [s.name for s in wb.sheets]:
+        trx_lt_df = trx_df[~trx_df["VaultName"].isin(excluded_vaults)].copy().reset_index(drop=True)
+        n_trx_lt = len(trx_lt_df)
+        print(f"      Writing TRX Lumetrade Master tab ({n_trx_lt:,} rows)...", end="", flush=True)
+        ws_trx_lt = wb.sheets["TRX Lumetrade Master"]
+        ws_trx_lt.clear()
+        if n_trx_lt > 0:
+            ws_trx_lt.range("A1").value = df_to_values(trx_lt_df)
+            format_sheet(ws_trx_lt, trx_lt_df)
+
+            ws_trx_lt.range("V1").value = "Spam?"
+            ws_trx_lt.range("V1").api.Font.Bold = True
+            ws_trx_lt.range("V1").api.Interior.Color = HEADER_BG_COLOR
+            ws_trx_lt.range(f"V2:V{n_trx_lt + 1}").formula = (
+                '=IF(J2="Inflow",IF(L2>XLOOKUP(H2,_Lists!C:C,_Lists!E:E),"","Spam"),"")'
+            )
+
+            for col_letter, header in [
+                ("W",  "Opening Balance"),
+                ("X",  "Inflow / (Outflow)"),
+                ("Y",  "Gas Fees"),
+                ("Z",  "Service Fees"),
+                ("AA", "Closing Balance"),
+            ]:
+                cell = ws_trx_lt.range(f"{col_letter}1")
+                cell.value = header
+                cell.api.Font.Bold = True
+                cell.api.Interior.Color = BALANCE_COL_COLOR
+
+            ws_trx_lt.range("W2").value = 0
+            if n_trx_lt > 1:
+                ws_trx_lt.range(f"W3:W{n_trx_lt + 1}").formula = "=AA2"
+
+            ws_trx_lt.range(f"X2:X{n_trx_lt + 1}").formula = '=IF(G2="TRX",U2,0)'
+            ws_trx_lt.range(f"Y2:Y{n_trx_lt + 1}").formula = (
+                '=IF(AND(COUNTIF(VaultData!$A:$A,C2)>0,J2="Outflow"),-S2,0)'
+            )
+            ws_trx_lt.range(f"Z2:Z{n_trx_lt + 1}").formula = '=IF(G2="TRX",-T2,0)'
+            ws_trx_lt.range(f"AA2:AA{n_trx_lt + 1}").formula = "=SUM(W2:Z2)"
+
+            for col_letter in ["W", "X", "Y", "Z", "AA"]:
+                ws_trx_lt.range(f"{col_letter}2:{col_letter}{n_trx_lt + 1}").api.NumberFormat = "#,##0.########"
+
+            for col_letter, header in [
+                ("AB", "TRX/ZAR"),
+                ("AC", "Inflow / (Outflow) ZAR"),
+                ("AD", "Lume Gas Fees (ZAR)"),
+                ("AE", "Service Fees ZAR"),
+            ]:
+                cell = ws_trx_lt.range(f"{col_letter}1")
+                cell.value = header
+                cell.api.Font.Bold = True
+                cell.api.Interior.Color = ZAR_COL_COLOR
+
+            ws_trx_lt.range(f"AB2:AB{n_trx_lt + 1}").formula = (
+                "=XLOOKUP(F2,'SA Exchange Rate Master'!A:A,'SA Exchange Rate Master'!E:E,\"Check rate\")"
+            )
+            ws_trx_lt.range(f"AC2:AC{n_trx_lt + 1}").formula = "=X2*AB2"
+            ws_trx_lt.range(f"AD2:AD{n_trx_lt + 1}").formula = "=Y2*AB2"
+            ws_trx_lt.range(f"AE2:AE{n_trx_lt + 1}").formula = "=Z2*AB2"
+            for col_letter in ["AB", "AC", "AD", "AE"]:
+                ws_trx_lt.range(f"{col_letter}2:{col_letter}{n_trx_lt + 1}").api.NumberFormat = "#,##0.##"
+
+            ws_trx_lt.api.Activate()
+            active_window = app.api.ActiveWindow
+            active_window.FreezePanes = False
+            active_window.SplitRow = 1
+            active_window.SplitColumn = 0
+            active_window.FreezePanes = True
+
+            try:
+                if ws_trx_lt.api.AutoFilterMode:
+                    ws_trx_lt.api.AutoFilterMode = False
+            except Exception:
+                pass
+            ws_trx_lt.range("A1").api.AutoFilter(Field=1)
         print(" done")
 
     print("      Updating Vault Ledger dropdown...", end="", flush=True)
@@ -905,13 +1172,19 @@ print()
 print("=" * 60)
 print("Refresh complete!")
 print("=" * 60)
-usdt_count = len(ledger_df[ledger_df["Asset Symbol"] == "USDT"]) if not ledger_df.empty else 0
-eth_count  = len(ledger_df[ledger_df["Asset"].isin(["ETH", "USDT_ERC20"])]) if not ledger_df.empty else 0
-trx_count  = len(ledger_df[ledger_df["Asset"].isin(["TRX", "TRX_USDT_S2UZ"])]) if not ledger_df.empty else 0
-print(f"  Data tab      : {len(tx_df):,} rows")
-print(f"  VaultData tab : {len(vault_df):,} rows")
-print(f"  LedgerData tab: {len(ledger_df):,} rows")
-print(f"  USDT Master   : {usdt_count:,} rows")
-print(f"  ETH Master    : {eth_count:,} rows")
-print(f"  TRX Master    : {trx_count:,} rows")
+usdt_count    = len(ledger_df[ledger_df["Asset Symbol"] == "USDT"]) if not ledger_df.empty else 0
+eth_count     = len(ledger_df[ledger_df["Asset"].isin(["ETH", "USDT_ERC20"])]) if not ledger_df.empty else 0
+trx_count     = len(ledger_df[ledger_df["Asset"].isin(["TRX", "TRX_USDT_S2UZ"])]) if not ledger_df.empty else 0
+usdt_lt_count = len(ledger_df[(ledger_df["Asset Symbol"] == "USDT") & ~ledger_df["VaultName"].isin(excluded_vaults)]) if not ledger_df.empty else 0
+eth_lt_count  = len(ledger_df[ledger_df["Asset"].isin(["ETH", "USDT_ERC20"]) & ~ledger_df["VaultName"].isin(excluded_vaults)]) if not ledger_df.empty else 0
+trx_lt_count  = len(ledger_df[ledger_df["Asset"].isin(["TRX", "TRX_USDT_S2UZ"]) & ~ledger_df["VaultName"].isin(excluded_vaults)]) if not ledger_df.empty else 0
+print(f"  Data tab              : {len(tx_df):,} rows")
+print(f"  VaultData tab         : {len(vault_df):,} rows")
+print(f"  LedgerData tab        : {len(ledger_df):,} rows")
+print(f"  USDT Master           : {usdt_count:,} rows")
+print(f"  ETH Master            : {eth_count:,} rows")
+print(f"  TRX Master            : {trx_count:,} rows")
+print(f"  USDT Lumetrade Master : {usdt_lt_count:,} rows")
+print(f"  ETH Lumetrade Master  : {eth_lt_count:,} rows")
+print(f"  TRX Lumetrade Master  : {trx_lt_count:,} rows")
 print()
