@@ -534,6 +534,10 @@ if os.path.exists(lock_file):
 # The try/finally block ensures the Excel process is always cleaned up,
 # even if the script crashes partway through.
 excluded_vaults = set()   # populated inside the try block after the workbook opens
+
+# Vaults that make up the "Lume Trade Treasury" view used by the
+# USDT/ETH/TRX Lumetrade Treasury tabs.
+TREASURY_VAULTS = ["Lume Trade Treasury", "Lume Trade Withdraw Pool"]
 app = xw.App(visible=False)
 try:
     wb = app.books.open(full_path)
@@ -1155,7 +1159,7 @@ try:
     # ── USDT Lumetrade Treasury tab ───────────────────────────────────────────
     # Same as USDT Master but filtered to only the "Lume Trade Treasury" vault.
     if not ledger_df.empty and "USDT Lumetrade Treasury" in [s.name for s in wb.sheets]:
-        usdt_tsy_df = usdt_df[usdt_df["VaultName"] == "Lume Trade Treasury"].copy().reset_index(drop=True)
+        usdt_tsy_df = usdt_df[usdt_df["VaultName"].isin(TREASURY_VAULTS)].copy().reset_index(drop=True)
         n_usdt_tsy = len(usdt_tsy_df)
         print(f"      Writing USDT Lumetrade Treasury tab ({n_usdt_tsy:,} rows)...", end="", flush=True)
         ws_usdt_tsy = wb.sheets["USDT Lumetrade Treasury"]
@@ -1222,7 +1226,7 @@ try:
     # ── ETH Lumetrade Treasury tab ────────────────────────────────────────────
     # Same as ETH Master but filtered to only the "Lume Trade Treasury" vault.
     if not ledger_df.empty and "ETH Lumetrade Treasury" in [s.name for s in wb.sheets]:
-        eth_tsy_df = eth_df[eth_df["VaultName"] == "Lume Trade Treasury"].copy().reset_index(drop=True)
+        eth_tsy_df = eth_df[eth_df["VaultName"].isin(TREASURY_VAULTS)].copy().reset_index(drop=True)
         n_eth_tsy = len(eth_tsy_df)
         print(f"      Writing ETH Lumetrade Treasury tab ({n_eth_tsy:,} rows)...", end="", flush=True)
         ws_eth_tsy = wb.sheets["ETH Lumetrade Treasury"]
@@ -1297,7 +1301,7 @@ try:
     # ── TRX Lumetrade Treasury tab ────────────────────────────────────────────
     # Same as TRX Master but filtered to only the "Lume Trade Treasury" vault.
     if not ledger_df.empty and "TRX Lumetrade Treasury" in [s.name for s in wb.sheets]:
-        trx_tsy_df = trx_df[trx_df["VaultName"] == "Lume Trade Treasury"].copy().reset_index(drop=True)
+        trx_tsy_df = trx_df[trx_df["VaultName"].isin(TREASURY_VAULTS)].copy().reset_index(drop=True)
         n_trx_tsy = len(trx_tsy_df)
         print(f"      Writing TRX Lumetrade Treasury tab ({n_trx_tsy:,} rows)...", end="", flush=True)
         ws_trx_tsy = wb.sheets["TRX Lumetrade Treasury"]
@@ -1396,9 +1400,9 @@ trx_count     = len(ledger_df[ledger_df["Asset"].isin(["TRX", "TRX_USDT_S2UZ"])]
 usdt_lt_count  = len(ledger_df[(ledger_df["Asset Symbol"] == "USDT") & ~ledger_df["VaultName"].isin(excluded_vaults)]) if not ledger_df.empty else 0
 eth_lt_count   = len(ledger_df[ledger_df["Asset"].isin(["ETH", "USDT_ERC20"]) & ~ledger_df["VaultName"].isin(excluded_vaults)]) if not ledger_df.empty else 0
 trx_lt_count   = len(ledger_df[ledger_df["Asset"].isin(["TRX", "TRX_USDT_S2UZ"]) & ~ledger_df["VaultName"].isin(excluded_vaults)]) if not ledger_df.empty else 0
-usdt_tsy_count = len(ledger_df[(ledger_df["Asset Symbol"] == "USDT") & (ledger_df["VaultName"] == "Lume Trade Treasury")]) if not ledger_df.empty else 0
-eth_tsy_count  = len(ledger_df[ledger_df["Asset"].isin(["ETH", "USDT_ERC20"]) & (ledger_df["VaultName"] == "Lume Trade Treasury")]) if not ledger_df.empty else 0
-trx_tsy_count  = len(ledger_df[ledger_df["Asset"].isin(["TRX", "TRX_USDT_S2UZ"]) & (ledger_df["VaultName"] == "Lume Trade Treasury")]) if not ledger_df.empty else 0
+usdt_tsy_count = len(ledger_df[(ledger_df["Asset Symbol"] == "USDT") & ledger_df["VaultName"].isin(TREASURY_VAULTS)]) if not ledger_df.empty else 0
+eth_tsy_count  = len(ledger_df[ledger_df["Asset"].isin(["ETH", "USDT_ERC20"]) & ledger_df["VaultName"].isin(TREASURY_VAULTS)]) if not ledger_df.empty else 0
+trx_tsy_count  = len(ledger_df[ledger_df["Asset"].isin(["TRX", "TRX_USDT_S2UZ"]) & ledger_df["VaultName"].isin(TREASURY_VAULTS)]) if not ledger_df.empty else 0
 print(f"  Data tab                   : {len(tx_df):,} rows")
 print(f"  VaultData tab              : {len(vault_df):,} rows")
 print(f"  LedgerData tab             : {len(ledger_df):,} rows")
