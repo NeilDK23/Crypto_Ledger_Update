@@ -1,3 +1,10 @@
 Transaction History Report/
 Vault Accounts Report/
 *.xlsx
+
+# Python
+__pycache__/
+*.pyc
+
+# Data backups
+Backups/
